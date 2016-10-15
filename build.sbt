@@ -10,7 +10,6 @@ addCompilerPlugin("org.spire-math" %% "kind-projector" % "0.9.0")
 
 libraryDependencies += "org.typelevel" %% "cats" % "0.7.2"
 
-
 scalacOptions ++= Seq(
   "-deprecation",
   "-encoding", "UTF-8",

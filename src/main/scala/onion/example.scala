@@ -1,12 +1,17 @@
 package onion
+import java.io.FileWriter
+
 import cats.data.{NonEmptyList, Xor}
 import cats.free.{Free, Inject}
 import cats.implicits._
 import cats.{Functor, Monad, ~>}
+import onion.example.LoggingF.Log
 
-import scala.concurrent.{ExecutionContext, Future}
+import scala.concurrent.ExecutionContext.Implicits.global
+import scala.concurrent.duration._
+import scala.concurrent.{Await, ExecutionContext, Future}
 
-object example {
+object example extends App {
   trait Console[F[_]] {
     def readLine: F[String]
     def writeLine(line: String): F[Unit]
@@ -17,16 +22,20 @@ object example {
     def writeLine[F[_]](line: String)(implicit F: Console[F]): F[Unit] = F.writeLine(line)
   }
 
-  def myProgram[F[_]: Console: Monad]: F[Unit] =
+  import Console._
+
+  def myMonadicProgram[F[_]: Console: Monad]: F[Unit] =
     for {
-      line <- Console.readLine
-      x <- Console.writeLine(s"You entered $line")
+      line <- readLine
+      x <- writeLine(s"You entered $line")
     } yield x
 
 
-  type Amount = BigDecimal
+
+  type Amount = Int
   type Error = String
   type Account = String
+
   final case class From[A](value: A) extends AnyVal
   final case class To[A](value: A) extends AnyVal
 
@@ -53,14 +62,13 @@ object example {
   case class Withdraw[A](amount: Amount, next: Amount => A) extends BankingF[A]
 
   object BankingF {
-    implicit def banking: Banking[BankingF] = new Banking[BankingF] {
+    implicit val banking: Banking[BankingF] = new Banking[BankingF] {
       override def accounts: BankingF[NonEmptyList[Account]] = Accounts(identity)
       override def balance(account: Account): BankingF[Amount] = Balance(account, identity)
       override def transfer(amount: Amount, from: From[Account], to: To[Account]): BankingF[TransferResult] = Transfer(amount, from, to, identity)
       override def withdraw(amount: Amount): BankingF[Amount] = Withdraw(amount, identity)
     }
   }
-
 
   implicit def bankingFree[F[_]](implicit F: Banking[F]): Banking[Free[F, ?]] =
     new Banking[Free[F, ?]] {
@@ -70,39 +78,39 @@ object example {
       def withdraw(amount: Amount): Free[F, Amount] = Free.liftF(F.withdraw(amount))
     }
 
+  import Banking._
 
   def injectExample[F[_]](implicit inject: Inject[BankingF, F]): Free[F, Amount] =
     for {
-      as <- Free.inject(Banking.accounts[BankingF])
-      b  <- Free.inject(Banking.balance[BankingF](as.head))
+      as <- Free.inject(accounts[BankingF])
+      b  <- Free.inject(balance[BankingF](as.head))
     } yield b
 
-  def program[F[_]: Monad : Banking]: F[Amount] =
+  def program[F[_]: Monad](implicit F: Banking[F]): F[Amount] =
     for {
-      as <- Banking.accounts[F]
-      b  <- Banking.balance[F](as.head)
+      as <- F.accounts
+      b  <- F.balance(as.head)
+      x <- F.transfer(123, From("Foo"), To("Bar"))
+      _ <- F.withdraw(5)
     } yield b
 
-
-  type Interpreter[F[_], G[_]] = F ~> Free[G, ?]
-
-  type ~<[F[_], G[_]] = Interpreter[F, G]
 
   type Halt[F[_], A] = F[Unit]
 
-  implicit def haltFunctor[F[_]] = new Functor[Halt[F, ?]] {
-    override def map[A, B](fa: Halt[F, A])(f: (A) => B): Halt[F, B] = fa
+  implicit def haltFunctor[F[_]]: Functor[Halt[F, ?]] =
+    new Functor[Halt[F, ?]] {
+      override def map[A, B](fa: Halt[F, A])(f: (A) => B): Halt[F, B] = fa
+    }
+
+  implicit class FreeHaltOps[F[_], A](free: Free[Halt[F, ?], A]) {
+    def unhalt: Free[F, Unit] =
+      free.fold(x => Free.pure(()), Free.liftF(_))
   }
 
   sealed trait LoggingF[A]
-  case class Log(string: String) extends LoggingF[Unit]
-
   object LoggingF {
+    case class Log(string: String) extends LoggingF[Unit]
     def log(string: String): Free[LoggingF, Unit] = Free.liftF(Log(string))
-  }
-
-  implicit class FreeHalt[F[_], A](free   : Free[Halt[F, ?], A]) {
-    def unhalt: Free[F, Unit] = free.fold[Free[F, Unit]](x => Free.pure(()), Free.liftF(_))
   }
 
   sealed trait ProtocolF[A]
@@ -110,16 +118,48 @@ object example {
   sealed trait SocketF[A]
 
   sealed trait FileF[A]
+  case class AppendToFile(fileName: String, string: String) extends FileF[Unit]
 
-  val bankingLogging : BankingF ~< Halt[LoggingF, ?] = null
+  val bankingLogging : BankingF ~< Halt[LoggingF, ?] =
+    new (BankingF ~< Halt[LoggingF, ?]) {
+      override def apply[A](fa: BankingF[A]): Free[Halt[LoggingF,?], A] = {
+        def log(string: String): Free[Halt[LoggingF, ?], A] = Free.liftF[Halt[LoggingF, ?], A](LoggingF.Log(string))
+        fa match {
+          case Accounts(next) => log("Fetch accounts")
+          case Balance(account, next) => log(s"Fetch balance for account = $account")
+          case Transfer(amount, from, to, next) => log(s"Transfer [$amount] from $from to $to")
+          case Withdraw(amount, next) => log(s"Withdraw $amount")
+        }
+      }
+  }
+
+  val loggingFile : LoggingF ~< FileF =
+    new (LoggingF ~< FileF) {
+      val fileName = "app.log"
+      override def apply[A](fa: LoggingF[A]): Free[FileF, A] = fa match {
+        case Log(string) =>
+          Free.liftF(AppendToFile(fileName, string))
+      }
+}
+
+  val execFile : FileF ~> Future =
+    new (FileF ~> Future) {
+      override def apply[A](fa: FileF[A]): Future[A] =
+        fa match {
+          case AppendToFile( fileName, string) =>
+            Future.successful {
+              val fw = new FileWriter(fileName, true)
+              try {
+                fw.write(string)
+              }
+              finally fw.close()
+            }
+        }
+  }
 
   val bankingProtocol : BankingF ~< ProtocolF = null
 
   val protocolSocket : ProtocolF ~< SocketF = null
-
-  val loggingFile : LoggingF ~< FileF = null
-
-  val execFile : FileF ~> Future = null
 
   val execSocket : SocketF ~> Future = null
 
@@ -129,9 +169,10 @@ object example {
     override def apply[A](fa: BankingF[A]): Future[A] =
       for  {
         _ <- bankingLogging(fa).unhalt.foldMap(loggingFile).foldMap(execFile)
-        result <- bankingProtocol(fa).foldMap[Free[SocketF, ?]](protocolSocket).foldMap(execSocket)
+        result <- bankingProtocol(fa).foldMap(protocolSocket).foldMap(execSocket)
       } yield result
   }
 
+  Await.result(bankingFProgram.foldMap(execBanking), 5.seconds)
 
 }
