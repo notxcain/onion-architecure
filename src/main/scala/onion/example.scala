@@ -6,6 +6,7 @@ import cats.free.{Free, Inject}
 import cats.implicits._
 import cats.{Functor, Monad, ~>}
 import onion.example.LoggingF.Log
+import onion.example.ProtocolF.JustReturn
 
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration._
@@ -114,8 +115,14 @@ object example extends App {
   }
 
   sealed trait ProtocolF[A]
+  object  ProtocolF {
+    case class JustReturn[A](a: A) extends ProtocolF[A]
+  }
 
   sealed trait SocketF[A]
+  object SocketF {
+    case class JustReturn[A](a: A) extends SocketF[A]
+  }
 
   sealed trait FileF[A]
   case class AppendToFile(fileName: String, string: String) extends FileF[Unit]
@@ -150,18 +157,41 @@ object example extends App {
             Future.successful {
               val fw = new FileWriter(fileName, true)
               try {
-                fw.write(string)
+                fw.write("\n" ++ string)
               }
               finally fw.close()
             }
         }
   }
 
-  val bankingProtocol : BankingF ~< ProtocolF = null
+  val bankingProtocol : BankingF ~< ProtocolF =
+    new (BankingF ~< ProtocolF) {
+      import ProtocolF._
+      override def apply[A](fa: BankingF[A]) =
+        fa match {
+          case Accounts(next) => Free.liftF(JustReturn(next(NonEmptyList.of("Foo", "Bar"))))
+          case Balance(account, next) => Free.liftF(JustReturn(next(10000)))
+          case Transfer(amount, from, to, next) => Free.liftF(JustReturn(next(Xor.left("Ooops"))))
+          case Withdraw(amount, next) => Free.liftF(JustReturn(next(10000-amount)))
+        }
+}
 
-  val protocolSocket : ProtocolF ~< SocketF = null
+  val protocolSocket : ProtocolF ~< SocketF =
+    new (ProtocolF ~< SocketF) {
+      override def apply[A](fa: ProtocolF[A]) =
+        fa match { case JustReturn( a) => Free.liftF(SocketF.JustReturn(a))}
+}
 
-  val execSocket : SocketF ~> Future = null
+  val execSocket : SocketF ~> Future =
+    new (SocketF ~> Future) {
+      override def apply[A](fa: SocketF[A]): Future[A] =
+        fa match {
+          case SocketF.JustReturn(a) => Future.successful {
+            println(a)
+            a
+          }
+        }
+}
 
   val bankingFProgram = program[Free[BankingF, ?]]
 
