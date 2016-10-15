@@ -4,13 +4,9 @@ import java.io.FileWriter
 import cats.data.{NonEmptyList, Xor}
 import cats.free.{Free, Inject}
 import cats.implicits._
-import cats.{Functor, Monad, ~>}
+import cats.{Functor, Id, Monad, ~>}
 import onion.example.LoggingF.Log
 import onion.example.ProtocolF.JustReturn
-
-import scala.concurrent.ExecutionContext.Implicits.global
-import scala.concurrent.duration._
-import scala.concurrent.{Await, ExecutionContext, Future}
 
 object example extends App {
   trait Console[F[_]] {
@@ -30,7 +26,6 @@ object example extends App {
       line <- readLine
       x <- writeLine(s"You entered $line")
     } yield x
-
 
 
   type Amount = Int
@@ -130,7 +125,8 @@ object example extends App {
   val bankingLogging : BankingF ~< Halt[LoggingF, ?] =
     new (BankingF ~< Halt[LoggingF, ?]) {
       override def apply[A](fa: BankingF[A]): Free[Halt[LoggingF,?], A] = {
-        def log(string: String): Free[Halt[LoggingF, ?], A] = Free.liftF[Halt[LoggingF, ?], A](LoggingF.Log(string))
+        def log(string: String): Free[Halt[LoggingF, ?], A] =
+          Free.liftF[Halt[LoggingF, ?], A](LoggingF.Log(string))
         fa match {
           case Accounts(next) => log("Fetch accounts")
           case Balance(account, next) => log(s"Fetch balance for account = $account")
@@ -149,18 +145,16 @@ object example extends App {
       }
 }
 
-  val execFile : FileF ~> Future =
-    new (FileF ~> Future) {
-      override def apply[A](fa: FileF[A]): Future[A] =
+  val execFile : FileF ~> Id =
+    new (FileF ~> Id) {
+      override def apply[A](fa: FileF[A]): Id[A] =
         fa match {
           case AppendToFile( fileName, string) =>
-            Future.successful {
-              val fw = new FileWriter(fileName, true)
-              try {
-                fw.write("\n" ++ string)
-              }
-              finally fw.close()
+            val fw = new FileWriter(fileName, true)
+            try {
+              fw.write("\n" ++ string)
             }
+            finally fw.close()
         }
   }
 
@@ -182,27 +176,29 @@ object example extends App {
         fa match { case JustReturn( a) => Free.liftF(SocketF.JustReturn(a))}
 }
 
-  val execSocket : SocketF ~> Future =
-    new (SocketF ~> Future) {
-      override def apply[A](fa: SocketF[A]): Future[A] =
+  val execSocket : SocketF ~> Id =
+    new (SocketF ~> Id) {
+      override def apply[A](fa: SocketF[A]): Id[A] =
         fa match {
-          case SocketF.JustReturn(a) => Future.successful {
+          case SocketF.JustReturn(a) =>
             println(a)
             a
-          }
         }
 }
 
   val bankingFProgram = program[Free[BankingF, ?]]
 
-  def execBanking(implicit executionContext: ExecutionContext) = new (BankingF ~> Future) {
-    override def apply[A](fa: BankingF[A]): Future[A] =
+  val execBanking = new (BankingF ~> Id) {
+    override def apply[A](fa: BankingF[A]): Id[A] =
       for  {
         _ <- bankingLogging(fa).unhalt.foldMap(loggingFile).foldMap(execFile)
         result <- bankingProtocol(fa).foldMap(protocolSocket).foldMap(execSocket)
       } yield result
   }
 
-  Await.result(bankingFProgram.foldMap(execBanking), 5.seconds)
+  bankingFProgram.foldMap(execBanking)
+
+
+
 
 }
