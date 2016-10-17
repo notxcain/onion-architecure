@@ -91,6 +91,9 @@ object example extends App {
     } yield b
 
 
+  type Interpreter[F[_], G[_]] = F ~> Free[G, ?]
+  type ~<[F[_], G[_]] = Interpreter[F, G]
+
   type Halt[F[_], A] = F[Unit]
 
   implicit def haltFunctor[F[_]]: Functor[Halt[F, ?]] =
@@ -197,8 +200,4 @@ object example extends App {
   }
 
   bankingFProgram.foldMap(execBanking)
-
-
-
-
 }
