@@ -10,6 +10,11 @@ addCompilerPlugin("org.spire-math" %% "kind-projector" % "0.9.0")
 
 libraryDependencies += "org.typelevel" %% "cats" % "0.7.2"
 
+libraryDependencies ++= Seq(
+  "io.monix" %% "monix-eval" % "2.0.4",
+  "io.monix" %% "monix-cats" % "2.0.4"
+)
+
 scalacOptions ++= Seq(
   "-deprecation",
   "-encoding", "UTF-8",
